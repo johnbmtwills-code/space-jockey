@@ -35,7 +35,7 @@
 
 <div id="title" class="ov">
   <h1>SPACE JOCKEY</h1>
-  <div class="ver">v0.3</div>
+  <div class="ver">v0.4</div>
   <p class="sub">Listen for the chime. Swing the couch onto the lit panel and fire before it winks out. Every panel you hit is gone for good: clear them all to win. The amber plating round the pillar is structure and can't be hit.
     Miss, or dither, and the sphere fires back.</p>
   <button id="start">START</button>
@@ -67,7 +67,7 @@
 <script>
 (() => {
 'use strict';
-const VERSION = 'v0.3';
+const VERSION = 'v0.4';
 
 // ---------- maths ----------
 const D2R = Math.PI / 180;
@@ -123,6 +123,11 @@ function buildSphere(subdiv) {
   return { V, E, EF, VF, faces };
 }
 const SPH = buildSphere(2); // 320 panels
+const BANDS = [['180,225,255', 0.6], ['110,240,230', 0.58], ['40,255,140', 0.55], ['40,200,110', 0.45], ['90,160,70', 0.4]];
+const EBAND = SPH.E.map(([a, b]) => {
+  const y = (SPH.V[a][1] + SPH.V[b][1]) / 2 / R; // -1..1
+  return y > 0.6 ? 0 : y > 0.25 ? 1 : y > -0.15 ? 2 : y > -0.5 ? 3 : 4;
+});
 
 // ---------- canvas ----------
 const cv = document.getElementById('c');
@@ -214,15 +219,15 @@ function noise(dest, t, dur, type, freq, gain) {
   n.connect(f); f.connect(g); g.connect(dest); n.start(t); n.stop(t + dur + 0.05);
 }
 // Bell chime with a bright transient: broadband content localises far better than a pure tone.
-function chime(p, vol) {
+function chime(p, vol, decay = 2.4) {
   if (!ac) return; const t = ac.currentTime;
   const g = ac.createGain(); g.gain.value = vol; g.connect(mkPanner(p));
   [[1, 1], [2.01, .55], [3.03, .4], [4.18, .28], [5.43, .18], [7.1, .1]].forEach(([m, a]) => {
     const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = 620 * m;
     const e = ac.createGain();
     e.gain.setValueAtTime(0, t); e.gain.linearRampToValueAtTime(a * 0.45, t + 0.004);
-    e.gain.exponentialRampToValueAtTime(0.0001, t + 2.4 / Math.sqrt(m));
-    o.connect(e); e.connect(g); o.start(t); o.stop(t + 2.6);
+    e.gain.exponentialRampToValueAtTime(0.0001, t + decay / Math.sqrt(m));
+    o.connect(e); e.connect(g); o.start(t); o.stop(t + decay + 0.2);
   });
   noise(g, t, 0.09, 'highpass', 2500, 0.7);
 }
@@ -261,6 +266,51 @@ function missSnd(p) {
   o.frequency.setValueAtTime(180, t); o.frequency.linearRampToValueAtTime(90, t + 0.35);
   const g = ac.createGain(); g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
   o.connect(g); g.connect(mkPanner(p)); o.start(t); o.stop(t + 0.45);
+}
+// Last quarter of a panel's life: the chime becomes a continuous, shimmering tone at the panel.
+let tone = null;
+function toneStart(p) {
+  if (!ac || tone) return; const t = ac.currentTime;
+  const pn = mkPanner(p);
+  const g = ac.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.22, t + 0.08);
+  const trem = ac.createGain(); trem.gain.value = 0.7;
+  const lfo = ac.createOscillator(); lfo.frequency.value = 9; const lg = ac.createGain(); lg.gain.value = 0.3;
+  lfo.connect(lg); lg.connect(trem.gain);
+  const oscs = [[620, 0.5, 'sine'], [1252, 0.25, 'sine'], [2510, 0.12, 'triangle']].map(([f, a, ty]) => {
+    const o = ac.createOscillator(); o.type = ty; o.frequency.value = f;
+    const og = ac.createGain(); og.gain.value = a; o.connect(og); og.connect(trem); o.start(t); return o;
+  });
+  trem.connect(g); g.connect(pn); lfo.start(t);
+  tone = { g, oscs: [...oscs, lfo] };
+}
+function toneStop() {
+  if (!tone) return; const tn = tone; tone = null; const t = ac.currentTime;
+  tn.g.gain.cancelScheduledValues(t); tn.g.gain.setValueAtTime(Math.max(tn.g.gain.value, 0.0001), t);
+  tn.g.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
+  tn.oscs.forEach(o => o.stop(t + 0.08));
+}
+// Ambient: a low, non-directional drone with slow pulsing (LFO on volume, slight pitch drift).
+let drone = null;
+function droneStart() {
+  if (!ac || drone) return; const t = ac.currentTime;
+  const out = ac.createGain(); out.gain.setValueAtTime(0.0001, t); out.gain.exponentialRampToValueAtTime(0.5, t + 2);
+  const am = ac.createGain(); am.gain.value = 0.6;
+  const lfo = ac.createOscillator(); lfo.frequency.value = 0.22; const lg = ac.createGain(); lg.gain.value = 0.4;
+  lfo.connect(lg); lg.connect(am.gain);
+  const drift = ac.createOscillator(); drift.frequency.value = 0.05; const dg = ac.createGain(); dg.gain.value = 0.6;
+  drift.connect(dg);
+  const oscs = [[55, 0.35], [82.4, 0.16], [110.3, 0.07]].map(([f, a]) => {
+    const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = f; dg.connect(o.frequency);
+    const og = ac.createGain(); og.gain.value = a; o.connect(og); og.connect(am); o.start(t); return o;
+  });
+  am.connect(out); out.connect(master); lfo.start(t); drift.start(t);
+  drone = { out, oscs: [...oscs, lfo, drift] };
+}
+function droneMute(m) { if (drone) { const t = ac.currentTime; drone.out.gain.cancelScheduledValues(t); drone.out.gain.setTargetAtTime(m ? 0.0001 : 0.5, t, 0.3); } }
+function droneStop() {
+  if (!drone) return; const d = drone; drone = null; const t = ac.currentTime;
+  d.out.gain.cancelScheduledValues(t); d.out.gain.setTargetAtTime(0.0001, t, 0.5);
+  d.oscs.forEach(o => o.stop(t + 3));
 }
 let whine = null;
 function whineStart(p) {
@@ -337,6 +387,8 @@ document.addEventListener('pointerlockchange', () => {
   else if (G.mouseMode && G.state === 'play') setPaused(true);
 });
 function setPaused(v) {
+  if (v) toneStop();
+  droneMute(v);
   G.paused = v; document.getElementById('pause').classList.toggle('hidden', !v);
   if (whine) whine.g.gain.value = v ? 0.0001 : 0.16;
 }
@@ -422,6 +474,7 @@ function newGame() {
   for (let i = 0; i < alive.length; i++) alive[i] = !struct[i]; aliveCount = TARGETS;
   gyro.calibrated = false;
   msg('LISTEN', '#7fffc0', 1.2);
+  droneStart();
   startSweep();
 }
 function msg(text, col, dur) { G.msgs.push({ text, col, t: dur, dur }); }
@@ -468,6 +521,7 @@ function addBeams(target) {
   G.beams.push({ t: 0.12, target });
 }
 function hitPanel() {
+  toneStop();
   const f = G.lit, react = G.elapsed / G.T;
   G.streak++; G.hits++;
   const pts = 100 + (G.streak - 1) * 25 + Math.round((1 - react) * 100);
@@ -501,14 +555,14 @@ function pointBurst(f) {
   const vs = f.v.map(i => SPH.V[i]);
   for (let k = 0; k < 380; k++) {
     let a = Math.random(), b = Math.random(); if (a + b > 1) { a = 1 - a; b = 1 - b; }
-    const p = add(vs[0], add(mul(sub(vs[1], vs[0]), a), mul(sub(vs[2], vs[0]), b)));
-    const life = rand(1.0, 2.2);
+    const p = mul(add(vs[0], add(mul(sub(vs[1], vs[0]), a), mul(sub(vs[2], vs[0]), b))), 0.95);
+    const life = rand(2.6, 4.0);
     G.points.push({ p, v: add(mul(f.dir, -rand(0.3, 3.2)), [rand(-.9,.9), rand(-.9,.9), rand(-.9,.9)]),
       t: life, dur: life, tw: rand(0, 6.28), col: Math.random() < 0.15 ? '255,255,255' : '120,205,255' });
   }
   for (let e = 0; e < 3; e++) for (let k = 0; k < 40; k++) {
     const p = add(vs[e], mul(sub(vs[(e + 1) % 3], vs[e]), k / 40));
-    G.points.push({ p, v: [0, 0, 0], t: 1.6, dur: 1.6, tw: rand(0, 6.28), col: '160,230,255' });
+    G.points.push({ p, v: [0, 0, 0], ghost: true, t: 1.6, dur: 1.6, tw: rand(0, 6.28), col: '160,230,255' });
   }
 }
 // Pups-style laser scan: a bright ring sweeps down the sphere, lighting the lattice as it passes.
@@ -523,6 +577,7 @@ function startSweep() {
   n.connect(f); f.connect(g); g.connect(master); n.start(t); n.stop(t + 1.6);
 }
 function startIncoming(face) {
+  toneStop();
   G.lit = null; G.phase = 'incoming';
   const S = face.c, E = [0, -0.9, 0];
   const d = norm(sub(E, S)), L = len(sub(E, S));
@@ -556,6 +611,7 @@ function lifeLost() {
   } else { G.phase = 'gap'; G.phaseT = 1.8; startSweep(); msg('HIT  ' + G.lives + ' LEFT', '#ff5a4a', 1.2); }
 }
 function gameOver() {
+  droneStop(); toneStop();
   G.state = 'over';
   document.querySelector('#over h2').textContent = G.won ? 'SPHERE CLEARED' : 'COUCH LOST';
   document.querySelector('#over h2').style.color = G.won ? '#7fffc0' : '';
@@ -590,8 +646,11 @@ function update(dt) {
     if (G.phase === 'gap') { G.phaseT -= dt; if (G.phaseT <= 0) lightPanel(); }
     else if (G.phase === 'lit') {
       G.elapsed += dt; G.ping -= dt;
-      if (G.ping <= 0 && G.elapsed < G.T - 0.3) { chime(G.lit.c, 0.45); G.ping = 1.5; }
-      if (G.elapsed >= G.T) { G.streak = 0; missSnd(G.lit.c); msg('TOO SLOW', '#ff5a4a', 0.9); startIncoming(G.lit); }
+      const fr = G.elapsed / G.T;
+      if (fr < 0.75) {  // beeps quicken as time runs out...
+        if (G.ping <= 0) { chime(G.lit.c, 0.35 + 0.35 * fr, 0.5); G.ping = 1.2 - 1.05 * (fr / 0.75); }
+      } else if (!tone) toneStart(G.lit.c); // ...then a continuous tone for the last quarter
+      if (G.elapsed >= G.T) { toneStop(); G.streak = 0; missSnd(G.lit.c); msg('TOO SLOW', '#ff5a4a', 0.9); startIncoming(G.lit); }
     } else if (G.phase === 'incoming') {
       const I = G.inc; I.s += I.v * dt;
       const p = add(I.S, mul(I.d, Math.max(0, I.s)));
@@ -605,7 +664,14 @@ function update(dt) {
     G.phaseT -= dt; if (G.phaseT <= 0) gameOver();
   }
   if (G.missT > 0) G.missT -= dt;
-  for (const q of G.points) { q.t -= dt; q.p = add(q.p, mul(q.v, dt)); q.v = mul(q.v, 1 - 0.8 * dt); }
+  for (const q of G.points) {
+    q.t -= dt;
+    if (q.ghost || q.landed) continue;
+    q.v = mul(q.v, 1 - 0.35 * dt); q.v[1] -= 5.5 * dt;          // gravity: debris always falls down
+    q.p = add(q.p, mul(q.v, dt));
+    q.age = (q.age || 0) + dt;
+    if (q.age > 0.25 && len(q.p) > R * 0.975) { q.p = mul(norm(q.p), R * 0.975); q.landed = true; } // settles on the sphere wall
+  }
   G.points = G.points.filter(q => q.t > 0);
   if (G.sweep) { G.sweep.t += dt; if (G.sweep.t >= G.sweep.dur) G.sweep = null; }
   for (const f of G.frags) { f.t -= dt; f.p = add(f.p, mul(f.v, dt)); f.ang = (f.ang || 0) + f.spin * dt; }
@@ -660,12 +726,35 @@ function render() {
   }
   ctx.fillStyle = 'rgba(200,120,20,0.22)'; ctx.fill();
   strokeGlow('255,170,40', 1.3, 0.6);
-  ctx.beginPath();
-  for (let i = 0; i < SPH.E.length; i++) {
-    const ef = SPH.EF[i]; if (!alive[ef[0]] && !alive[ef[1]] && !struct[ef[0]] && !struct[ef[1]]) continue;
-    segCam(CV[SPH.E[i][0]], CV[SPH.E[i][1]]);
+  // lattice, banded by height: ice-blue overhead, green at the horizon, dark olive below
+  for (let band = 0; band < BANDS.length; band++) {
+    ctx.beginPath();
+    for (let i = 0; i < SPH.E.length; i++) {
+      if (EBAND[i] !== band) continue;
+      const ef = SPH.EF[i]; if (!alive[ef[0]] && !alive[ef[1]] && !struct[ef[0]] && !struct[ef[1]]) continue;
+      segCam(CV[SPH.E[i][0]], CV[SPH.E[i][1]]);
+    }
+    strokeGlow(BANDS[band][0], 1.1, BANDS[band][1]);
   }
-  strokeGlow('40,255,140', 1.1, 0.55);
+  // horizon ring with azimuth ticks
+  ctx.beginPath();
+  for (let i = 0; i < 72; i++) {
+    const a = i / 72 * Math.PI * 2, a2 = (i + 1) / 72 * Math.PI * 2, r = R * 0.99;
+    seg([Math.cos(a) * r, 0, Math.sin(a) * r], [Math.cos(a2) * r, 0, Math.sin(a2) * r]);
+    if (i % 3 === 0) { const tk = i % 18 === 0 ? 0.6 : 0.25; seg([Math.cos(a) * r, -tk, Math.sin(a) * r], [Math.cos(a) * r, tk, Math.sin(a) * r]); }
+  }
+  strokeGlow('120,255,200', 1.6, 0.8);
+  // zenith beacon
+  {
+    const zc = toCam([0, R * 0.97, 0]);
+    if (zc[2] > NEAR) {
+      const [zx, zy] = proj(zc), pr = 1 + 0.25 * Math.sin(G.time * 3), sz = 14 * pr;
+      ctx.beginPath();
+      ctx.moveTo(zx - sz, zy); ctx.lineTo(zx + sz, zy); ctx.moveTo(zx, zy - sz); ctx.lineTo(zx, zy + sz);
+      ctx.moveTo(zx + sz * 0.45, zy); ctx.arc(zx, zy, sz * 0.45, 0, Math.PI * 2);
+      strokeGlow('230,245,255', 1.6, 0.9);
+    }
+  }
   // vertex nodes
   ctx.fillStyle = 'rgba(120,255,190,0.75)';
   CV.forEach((c, i) => { if (c[2] > NEAR && SPH.VF[i].some(fi => alive[fi] || struct[fi])) { const s = proj(c); ctx.fillRect(s[0] - 1.2, s[1] - 1.2, 2.4, 2.4); } });
