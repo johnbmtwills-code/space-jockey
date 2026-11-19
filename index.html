@@ -1,0 +1,800 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#000000">
+<title>Space Jockey</title>
+<style>
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;touch-action:none;
+    -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+  canvas{display:block;position:fixed;inset:0;width:100vw;height:100vh}
+  .ov{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    color:#3f9;font-family:"Courier New",Courier,monospace;text-align:center;background:rgba(0,0,0,.72);padding:20px;box-sizing:border-box}
+  .hidden{display:none}
+  h1{font-size:clamp(34px,8vw,72px);letter-spacing:.18em;margin:0;color:#7fffc0;text-shadow:0 0 12px #2f8}
+  h2{font-size:clamp(28px,6vw,52px);letter-spacing:.15em;margin:0 0 10px;color:#ff5a4a;text-shadow:0 0 10px #f42}
+  .ver{font-size:13px;opacity:.7;margin:4px 0 18px;letter-spacing:.2em}
+  .sub{max-width:560px;font-size:16px;line-height:1.45;margin:0 0 20px}
+  button{font-family:inherit;font-size:20px;letter-spacing:.2em;color:#000;background:#3f9;border:0;padding:12px 34px;margin:6px;
+    border-radius:3px;box-shadow:0 0 14px #2f8;cursor:pointer}
+  button.alt{background:transparent;color:#3f9;border:1px solid #3f9;box-shadow:none}
+  .opts{margin:18px 0 10px;display:flex;flex-direction:column;gap:10px;font-size:15px;text-align:left}
+  .opts label{cursor:pointer}
+  .opts input{transform:scale(1.3);margin-right:10px;accent-color:#3f9}
+  .help{font-size:13px;opacity:.8;max-width:560px;line-height:1.5;margin-top:8px}
+  .note{font-size:12px;color:#ffb000;max-width:560px;line-height:1.5;margin-top:12px}
+  .best{margin-top:14px;font-size:14px;letter-spacing:.2em}
+  #gyroMsg{font-size:12px;color:#ffb000;min-height:1em;margin-top:6px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div id="title" class="ov">
+  <h1>SPACE JOCKEY</h1>
+  <div class="ver">v0.1</div>
+  <p class="sub">Listen for the chime. Swing the couch onto the lit panel and fire before it winks out.
+    Miss, or dither, and the sphere fires back.</p>
+  <button id="start">START</button>
+  <div class="opts">
+    <label><input type="checkbox" id="optGyro">iPad mode: turn the device to aim</label>
+    <label><input type="checkbox" id="optHint" checked>Direction hint after a second</label>
+  </div>
+  <div id="gyroMsg"></div>
+  <div class="help">Drag to rotate and tilt the couch. Tap, click or Space to fire. Arrow keys also steer.<br>
+    When the sphere returns fire, an amber zone lights up on the projectile's path.
+    Aim at it and fire while the projectile is inside it. You have two interceptors per attack.</div>
+  <div class="note">Headphones essential: the chime tells you where to look.<br>
+    AirPods: turn off Spatialise Stereo in Control Centre while playing, or it fights the game's own positioning.</div>
+  <div class="best" id="bestT">BEST 0</div>
+</div>
+
+<div id="over" class="ov hidden">
+  <h2>COUCH LOST</h2>
+  <div id="finalScore" style="font-size:20px;margin-bottom:18px"></div>
+  <div><button id="again">AGAIN</button><button id="menu" class="alt">MENU</button></div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const VERSION = 'v0.1';
+
+// ---------- maths ----------
+const D2R = Math.PI / 180;
+const add = (a, b) => [a[0]+b[0], a[1]+b[1], a[2]+b[2]];
+const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+const mul = (a, s) => [a[0]*s, a[1]*s, a[2]*s];
+const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const len = a => Math.hypot(a[0], a[1], a[2]);
+const norm = a => { const l = len(a) || 1; return [a[0]/l, a[1]/l, a[2]/l]; };
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const angBetween = (a, b) => Math.acos(clamp(dot(norm(a), norm(b)), -1, 1));
+const rand = (a, b) => a + Math.random() * (b - a);
+function perpBasis(d) {
+  const ref = Math.abs(d[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+  const a = norm(cross(d, ref)); const b = cross(d, a); return [a, b];
+}
+
+// ---------- geodesic sphere ----------
+const R = 10;
+function buildSphere(subdiv) {
+  const t = (1 + Math.sqrt(5)) / 2;
+  let V = [[-1,t,0],[1,t,0],[-1,-t,0],[1,-t,0],[0,-1,t],[0,1,t],[0,-1,-t],[0,1,-t],[t,0,-1],[t,0,1],[-t,0,-1],[-t,0,1]].map(norm);
+  let F = [[0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],[1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
+           [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],[4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1]];
+  for (let s = 0; s < subdiv; s++) {
+    const cache = new Map(); const NF = [];
+    const mid = (a, b) => {
+      const k = a < b ? a + '_' + b : b + '_' + a;
+      if (cache.has(k)) return cache.get(k);
+      V.push(norm(mul(add(V[a], V[b]), 0.5))); cache.set(k, V.length - 1); return V.length - 1;
+    };
+    for (const [a, b, c] of F) {
+      const ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+      NF.push([a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]);
+    }
+    F = NF;
+  }
+  V = V.map(v => mul(v, R));
+  const eset = new Set(); const E = [];
+  for (const [a, b, c] of F) for (const [p, q] of [[a,b],[b,c],[c,a]]) {
+    const k = p < q ? p + '_' + q : q + '_' + p;
+    if (!eset.has(k)) { eset.add(k); E.push([p, q]); }
+  }
+  const faces = F.map((v, i) => {
+    const dir = norm(add(add(V[v[0]], V[v[1]]), V[v[2]]));
+    return { i, v, dir, c: mul(dir, R * 0.985), elev: Math.asin(dir[1]) };
+  });
+  return { V, E, faces };
+}
+const SPH = buildSphere(2); // 320 panels
+
+// ---------- canvas ----------
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1, CX = 0, CY = 0, FOC = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  CX = W / 2; CY = H / 2;
+  FOC = (Math.min(W, H) / 2) / Math.tan(36 * D2R);
+}
+window.addEventListener('resize', resize); resize();
+
+// ---------- camera ----------
+const NEAR = 0.05;
+let cf = [0,0,-1], cr = [1,0,0], cu = [0,1,0];
+function setCamera(yaw, pitch) {
+  const cp = Math.cos(pitch);
+  cf = [-Math.sin(yaw) * cp, Math.sin(pitch), -Math.cos(yaw) * cp];
+  cr = [Math.cos(yaw), 0, -Math.sin(yaw)];
+  cu = cross(cr, cf);
+}
+const toCam = p => [dot(p, cr), dot(p, cu), dot(p, cf)];
+const proj = c => [CX + c[0] / c[2] * FOC, CY - c[1] / c[2] * FOC];
+function lerpZ(P, Q) { const t = (NEAR - P[2]) / (Q[2] - P[2]); return [P[0] + (Q[0]-P[0])*t, P[1] + (Q[1]-P[1])*t, NEAR]; }
+function segCam(A, B) { // camera-space segment -> path
+  if (A[2] < NEAR && B[2] < NEAR) return;
+  if (A[2] < NEAR) A = lerpZ(A, B); else if (B[2] < NEAR) B = lerpZ(B, A);
+  const a = proj(A), b = proj(B); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+}
+const seg = (a, b) => segCam(toCam(a), toCam(b));
+function clipPoly(pts) {
+  const out = [];
+  for (let i = 0; i < pts.length; i++) {
+    const P = pts[i], Q = pts[(i + 1) % pts.length];
+    const pin = P[2] >= NEAR, qin = Q[2] >= NEAR;
+    if (pin) out.push(P);
+    if (pin !== qin) out.push(lerpZ(P, Q));
+  }
+  return out;
+}
+function fillPoly(worldPts) {
+  const c = clipPoly(worldPts.map(toCam)); if (c.length < 3) return false;
+  ctx.beginPath(); c.forEach((p, i) => { const s = proj(p); i ? ctx.lineTo(s[0], s[1]) : ctx.moveTo(s[0], s[1]); });
+  ctx.closePath(); return true;
+}
+function onScreen(p, margin = 0) {
+  const c = toCam(p); if (c[2] < NEAR) return false;
+  const s = proj(c); return s[0] > margin && s[0] < W - margin && s[1] > margin && s[1] < H - margin;
+}
+
+// ---------- audio ----------
+let ac = null, master = null, noiseBuf = null;
+function audioInit() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  if (!ac) {
+    ac = new AC();
+    master = ac.createGain(); master.gain.value = 0.9; master.connect(ac.destination);
+    noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const s = ac.createBufferSource(); s.buffer = ac.createBuffer(1, 1, 22050); s.connect(master); s.start(0);
+  }
+  if (ac.state !== 'running') ac.resume();
+}
+function setPos(node, p) {
+  if (node.positionX) { node.positionX.value = p[0]; node.positionY.value = p[1]; node.positionZ.value = p[2]; }
+  else node.setPosition(p[0], p[1], p[2]);
+}
+function mkPanner(p) {
+  const n = ac.createPanner();
+  n.panningModel = 'HRTF'; n.distanceModel = 'inverse';
+  n.refDistance = 4; n.maxDistance = 100; n.rolloffFactor = 0.6;
+  setPos(n, p); n.connect(master); return n;
+}
+function updateListener() {
+  if (!ac) return;
+  const L = ac.listener;
+  if (L.forwardX) {
+    L.forwardX.value = cf[0]; L.forwardY.value = cf[1]; L.forwardZ.value = cf[2];
+    L.upX.value = cu[0]; L.upY.value = cu[1]; L.upZ.value = cu[2];
+  } else if (L.setOrientation) L.setOrientation(cf[0], cf[1], cf[2], cu[0], cu[1], cu[2]);
+}
+function noise(dest, t, dur, type, freq, gain) {
+  const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true;
+  const f = ac.createBiquadFilter(); f.type = type; f.frequency.value = freq;
+  const g = ac.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  n.connect(f); f.connect(g); g.connect(dest); n.start(t); n.stop(t + dur + 0.05);
+}
+// Bell chime with a bright transient: broadband content localises far better than a pure tone.
+function chime(p, vol) {
+  if (!ac) return; const t = ac.currentTime;
+  const g = ac.createGain(); g.gain.value = vol; g.connect(mkPanner(p));
+  [[1, 1], [2.01, .55], [3.03, .4], [4.18, .28], [5.43, .18], [7.1, .1]].forEach(([m, a]) => {
+    const o = ac.createOscillator(); o.type = 'sine'; o.frequency.value = 620 * m;
+    const e = ac.createGain();
+    e.gain.setValueAtTime(0, t); e.gain.linearRampToValueAtTime(a * 0.45, t + 0.004);
+    e.gain.exponentialRampToValueAtTime(0.0001, t + 2.4 / Math.sqrt(m));
+    o.connect(e); e.connect(g); o.start(t); o.stop(t + 2.6);
+  });
+  noise(g, t, 0.09, 'highpass', 2500, 0.7);
+}
+function laserSnd() {
+  if (!ac) return; const t = ac.currentTime;
+  const o = ac.createOscillator(); o.type = 'sawtooth';
+  o.frequency.setValueAtTime(1800, t); o.frequency.exponentialRampToValueAtTime(160, t + 0.2);
+  const g = ac.createGain(); g.gain.setValueAtTime(0.18, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.22);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.25);
+}
+function boomSnd(p, big) {
+  if (!ac) return; const t = ac.currentTime; const pn = mkPanner(p);
+  noise(pn, t, big ? 1.2 : 0.6, 'lowpass', big ? 900 : 1600, big ? 1.4 : 1.0);
+  const o = ac.createOscillator(); o.type = 'sine';
+  o.frequency.setValueAtTime(big ? 120 : 220, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.5);
+  const g = ac.createGain(); g.gain.setValueAtTime(0.6, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+  o.connect(g); g.connect(pn); o.start(t); o.stop(t + 0.65);
+}
+function shieldSnd(p) {
+  if (!ac) return; const t = ac.currentTime; const pn = mkPanner(p);
+  [1180, 1490, 1770, 2360].forEach((f, i) => {
+    const o = ac.createOscillator(); o.type = 'triangle'; o.frequency.value = f;
+    const lfo = ac.createOscillator(); lfo.frequency.value = 23 + i * 7;
+    const lg = ac.createGain(); lg.gain.value = 40; lfo.connect(lg); lg.connect(o.frequency);
+    const g = ac.createGain(); g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 1.1);
+    o.connect(g); g.connect(pn); o.start(t); lfo.start(t); o.stop(t + 1.2); lfo.stop(t + 1.2);
+  });
+  noise(pn, t, 0.4, 'bandpass', 3000, 0.8);
+}
+function fizzleSnd() {
+  if (!ac) return; noise(master, ac.currentTime, 0.25, 'bandpass', 1200, 0.35);
+}
+function missSnd(p) {
+  if (!ac) return; const t = ac.currentTime;
+  const o = ac.createOscillator(); o.type = 'square';
+  o.frequency.setValueAtTime(180, t); o.frequency.linearRampToValueAtTime(90, t + 0.35);
+  const g = ac.createGain(); g.gain.setValueAtTime(0.12, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+  o.connect(g); g.connect(mkPanner(p)); o.start(t); o.stop(t + 0.45);
+}
+let whine = null;
+function whineStart(p) {
+  if (!ac) return; whineStop();
+  const pn = mkPanner(p);
+  const o = ac.createOscillator(); o.type = 'sawtooth'; o.frequency.value = 220;
+  const o2 = ac.createOscillator(); o2.type = 'square'; o2.frequency.value = 223;
+  const f = ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 2200;
+  const g = ac.createGain(); g.gain.value = 0.0001; g.gain.exponentialRampToValueAtTime(0.16, ac.currentTime + 0.3);
+  o.connect(f); o2.connect(f); f.connect(g); g.connect(pn); o.start(); o2.start();
+  whine = { pn, o, o2, g };
+}
+function whineUpdate(p, frac) {
+  if (!whine) return; setPos(whine.pn, p);
+  const f = 220 + 900 * frac * frac;
+  whine.o.frequency.value = f; whine.o2.frequency.value = f * 1.013;
+}
+function whineStop() {
+  if (!whine) return; const w = whine; whine = null; const t = ac.currentTime;
+  w.g.gain.cancelScheduledValues(t); w.g.gain.setValueAtTime(Math.max(w.g.gain.value, 0.0001), t);
+  w.g.gain.exponentialRampToValueAtTime(0.0001, t + 0.08);
+  w.o.stop(t + 0.1); w.o2.stop(t + 0.1);
+}
+function zoneEnterSnd() {
+  if (!ac) return; const t = ac.currentTime;
+  const o = ac.createOscillator(); o.type = 'square'; o.frequency.value = 1320;
+  const g = ac.createGain(); g.gain.setValueAtTime(0.08, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.14);
+}
+
+// ---------- storage ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('spacejockey.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('spacejockey.' + k, JSON.stringify(v)); } catch (e) {} }
+};
+
+// ---------- state ----------
+const PITCH_MIN = -70 * D2R, PITCH_MAX = 85 * D2R;
+const G = {
+  state: 'title', yaw: 0, pitch: 0, best: store.get('best', 0),
+  score: 0, lives: 3, streak: 0, hits: 0, T: 5,
+  phase: 'gap', phaseT: 0, lit: null, elapsed: 0, ping: 0, lastLit: -1,
+  inc: null, missFace: null, missT: 0,
+  frags: [], blooms: [], beams: [], msgs: [], flash: 0, flashCol: '255,40,30', shake: 0, time: 0,
+  hints: store.get('hints', true), gyroMode: store.get('gyro', false)
+};
+
+// ---------- input ----------
+const keys = {};
+const ptr = { id: null, x: 0, y: 0, sx: 0, sy: 0, t: 0, moved: 0 };
+const DRAG_SENS = 0.0055;
+cv.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (ptr.id !== null) return;
+  ptr.id = e.pointerId; ptr.x = ptr.sx = e.clientX; ptr.y = ptr.sy = e.clientY; ptr.t = performance.now(); ptr.moved = 0;
+  try { cv.setPointerCapture(e.pointerId); } catch (_) {}
+});
+cv.addEventListener('pointermove', e => {
+  if (e.pointerId !== ptr.id) return;
+  e.preventDefault();
+  const dx = e.clientX - ptr.x, dy = e.clientY - ptr.y;
+  ptr.x = e.clientX; ptr.y = e.clientY; ptr.moved += Math.abs(dx) + Math.abs(dy);
+  if (G.state !== 'play') return;
+  if (gyro.active) { gyro.yawOffset -= dx * DRAG_SENS; }
+  else { G.yaw -= dx * DRAG_SENS; G.pitch = clamp(G.pitch - dy * DRAG_SENS, PITCH_MIN, PITCH_MAX); }
+});
+function endPtr(e) {
+  if (e.pointerId !== ptr.id) return;
+  const dt = performance.now() - ptr.t;
+  if (ptr.moved < 12 && dt < 350 && G.state === 'play') fire();
+  ptr.id = null;
+}
+cv.addEventListener('pointerup', endPtr);
+cv.addEventListener('pointercancel', e => { if (e.pointerId === ptr.id) ptr.id = null; });
+window.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space') { e.preventDefault(); if (G.state === 'play' && !e.repeat) fire(); }
+  if (e.code.startsWith('Arrow')) e.preventDefault();
+});
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+document.addEventListener('gesturestart', e => e.preventDefault());
+
+// ---------- iPad mode (device orientation) ----------
+const gyro = { enabled: false, active: false, yawOffset: 0, devYaw: 0, devPitch: 0, calibrated: false, lastEvt: 0 };
+function qmul(a, b) {
+  return [a[0]*b[3] + a[3]*b[0] + a[1]*b[2] - a[2]*b[1],
+          a[1]*b[3] + a[3]*b[1] + a[2]*b[0] - a[0]*b[2],
+          a[2]*b[3] + a[3]*b[2] + a[0]*b[1] - a[1]*b[0],
+          a[3]*b[3] - a[0]*b[0] - a[1]*b[1] - a[2]*b[2]];
+}
+function qrot(q, v) {
+  const u = [q[0], q[1], q[2]]; const t = mul(cross(u, v), 2);
+  return add(add(v, mul(t, q[3])), cross(u, t));
+}
+function screenAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') return screen.orientation.angle;
+  return typeof window.orientation === 'number' ? window.orientation : 0;
+}
+function onOrient(e) {
+  if (e.alpha == null || e.beta == null) return;
+  const x = e.beta * D2R, y = e.alpha * D2R, z = -e.gamma * D2R;
+  const c1 = Math.cos(x/2), c2 = Math.cos(y/2), c3 = Math.cos(z/2), s1 = Math.sin(x/2), s2 = Math.sin(y/2), s3 = Math.sin(z/2);
+  let q = [s1*c2*c3 + c1*s2*s3, c1*s2*c3 - s1*c2*s3, c1*c2*s3 - s1*s2*c3, c1*c2*c3 + s1*s2*s3];
+  q = qmul(q, [-Math.SQRT1_2, 0, 0, Math.SQRT1_2]);
+  const h = -screenAngle() * D2R / 2; q = qmul(q, [0, 0, Math.sin(h), Math.cos(h)]);
+  const f = qrot(q, [0, 0, -1]);
+  gyro.devYaw = Math.atan2(-f[0], -f[2]);
+  gyro.devPitch = Math.asin(clamp(f[1], -1, 1));
+  gyro.lastEvt = performance.now();
+  if (!gyro.active) { gyro.active = true; gyro.calibrated = false; }
+}
+function enableGyro() {
+  const msg = document.getElementById('gyroMsg');
+  const attach = () => { window.addEventListener('deviceorientation', onOrient); gyro.enabled = true; };
+  if (typeof DeviceOrientationEvent === 'undefined') { msg.textContent = 'This device has no motion sensor: using drag.'; return; }
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    DeviceOrientationEvent.requestPermission().then(s => {
+      if (s === 'granted') attach(); else msg.textContent = 'Motion access refused: using drag.';
+    }).catch(() => { msg.textContent = 'Motion access unavailable: using drag.'; });
+  } else attach();
+}
+function disableGyro() { window.removeEventListener('deviceorientation', onOrient); gyro.enabled = false; gyro.active = false; }
+function angDiff(a, b) { let d = a - b; while (d > Math.PI) d -= 2*Math.PI; while (d < -Math.PI) d += 2*Math.PI; return d; }
+
+// ---------- game flow ----------
+function newGame() {
+  Object.assign(G, { state: 'play', score: 0, lives: 3, streak: 0, hits: 0, T: 5, phase: 'gap', phaseT: 1.2,
+    lit: null, inc: null, frags: [], blooms: [], beams: [], msgs: [], flash: 0, shake: 0, lastLit: -1, missFace: null });
+  gyro.calibrated = false;
+  msg('LISTEN', '#7fffc0', 1.2);
+}
+function msg(text, col, dur) { G.msgs.push({ text, col, t: dur, dur }); }
+
+function pickFace() {
+  const lo = -42 * D2R, hi = 62 * D2R;
+  let cands = SPH.faces.filter(f => f.elev > lo && f.elev < hi && f.i !== G.lastLit);
+  const far = cands.filter(f => angBetween(f.dir, cf) > 55 * D2R);
+  if (far.length) cands = far;
+  return cands[(Math.random() * cands.length) | 0];
+}
+function lightPanel() {
+  const f = pickFace();
+  G.lit = f; G.lastLit = f.i; G.elapsed = 0; G.ping = 1.5; G.phase = 'lit';
+  chime(f.c, 1);
+}
+const AIM_TOL = 8.5 * D2R;
+function fire() {
+  if (G.phase === 'lit') {
+    laserSnd(); addBeams(null);
+    if (angBetween(cf, G.lit.dir) < AIM_TOL) hitPanel();
+    else {
+      let best = null, bd = -2;
+      for (const f of SPH.faces) { const d = dot(f.dir, cf); if (d > bd) { bd = d; best = f; } }
+      G.missFace = best; G.missT = 0.5; missSnd(best.c);
+      G.streak = 0; msg('MISS', '#ff5a4a', 0.9);
+      startIncoming(G.lit);
+    }
+  } else if (G.phase === 'incoming') {
+    const I = G.inc; if (I.shots <= 0 || I.done) return;
+    I.shots--; laserSnd(); addBeams(I.Zc);
+    const aimOk = angBetween(cf, I.Zc) < Math.atan2(I.zrad * 1.1, len(I.Zc));
+    const inZone = Math.abs(I.s - I.sz) <= I.w;
+    if (aimOk && inZone) intercept();
+    else {
+      fizzleSnd();
+      const where = aimOk ? I.Zc : add(mul(cf, len(I.Zc)), [0, 0, 0]);
+      G.blooms.push({ c: where, d: aimOk ? I.d : mul(cf, -1), t: 0, dur: 0.45, col: '120,140,140', r: 0.6 });
+      msg(!aimOk ? 'OFF TARGET' : (I.s < I.sz ? 'TOO EARLY' : 'TOO LATE'), '#ffb000', 0.8);
+    }
+  }
+}
+function addBeams(target) {
+  G.beams.push({ t: 0.12, target });
+}
+function hitPanel() {
+  const f = G.lit, react = G.elapsed / G.T;
+  G.streak++; G.hits++;
+  const pts = 100 + (G.streak - 1) * 25 + Math.round((1 - react) * 100);
+  G.score += pts;
+  if (react < 0.55) G.T = Math.max(1.3, G.T * 0.86);   // quick: next panel stays lit for less time
+  else G.T = Math.min(6, G.T * 1.08);                   // slow: next one lingers a little longer
+  shatterFace(f, '127,255,200'); boomSnd(f.c, false);
+  msg('+' + pts + (G.streak > 1 ? '  x' + G.streak : ''), '#7fffc0', 0.9);
+  G.lit = null; G.phase = 'gap'; G.phaseT = 0.75;
+}
+function shatterFace(f, col) {
+  const vs = f.v.map(i => SPH.V[i]);
+  for (let k = 0; k < 3; k++) {
+    const a = vs[k], b = vs[(k + 1) % 3];
+    const m = mul(add(a, b), 0.5);
+    G.frags.push({ a: sub(a, m), b: sub(b, m), p: m, v: add(mul(f.dir, -rand(2, 5)), [rand(-1.5,1.5), rand(-1.5,1.5), rand(-1.5,1.5)]),
+      spin: rand(-6, 6), ax: norm([rand(-1,1), rand(-1,1), rand(-1,1)]), t: 1.1, dur: 1.1, col });
+  }
+}
+function startIncoming(face) {
+  G.lit = null; G.phase = 'incoming';
+  const S = face.c, E = [0, -0.9, 0];
+  const d = norm(sub(E, S)), L = len(sub(E, S));
+  const v = Math.min(6.2, 3.4 + G.hits * 0.07);
+  const zd = Math.max(3.0, 5.2 - G.hits * 0.05);   // zone creeps closer to the couch
+  const w = Math.max(0.6, 1.15 - G.hits * 0.015);   // and gets shallower
+  const sz = L - zd;
+  const Zc = add(S, mul(d, sz));
+  G.inc = { S, E, d, L, s: -v * 0.5, v, sz, w, zrad: 1.05, Zc, shots: 2, inside: false, done: false, basis: perpBasis(d), face };
+  whineStart(S);
+}
+function intercept() {
+  const I = G.inc; I.done = true;
+  const p = add(I.S, mul(I.d, I.s));
+  G.score += 150; whineStop(); shieldSnd(p);
+  G.blooms.push({ c: p, d: I.d, t: 0, dur: 0.9, col: '90,230,255', r: 2.4 });
+  for (let k = 0; k < 8; k++) {
+    const a = [rand(-.3,.3), rand(-.3,.3), rand(-.3,.3)];
+    G.frags.push({ a, b: mul(a, -1), p, v: [rand(-4,4), rand(-4,4), rand(-4,4)], spin: rand(-8,8), ax: norm([rand(-1,1),rand(-1,1),rand(-1,1)]), t: 0.9, dur: 0.9, col: '255,90,70' });
+  }
+  msg('INTERCEPTED  +150', '#5ae6ff', 1.0);
+  G.inc = null; G.phase = 'gap'; G.phaseT = 1.0;
+}
+function lifeLost() {
+  whineStop(); boomSnd([0, -0.5, -0.5], true);
+  G.lives--; G.flash = 1; G.flashCol = '255,40,30'; G.shake = 0.6; G.streak = 0;
+  G.T = Math.min(6, G.T * 1.15);
+  G.inc = null;
+  if (G.lives <= 0) {
+    G.phase = 'over'; G.state = 'dying'; G.phaseT = 1.6; msg('COUCH LOST', '#ff5a4a', 1.6);
+  } else { G.phase = 'gap'; G.phaseT = 1.4; msg('HIT  ' + G.lives + ' LEFT', '#ff5a4a', 1.2); }
+}
+function gameOver() {
+  G.state = 'over';
+  if (G.score > G.best) { G.best = G.score; store.set('best', G.best); }
+  document.getElementById('finalScore').innerHTML = 'SCORE ' + G.score + '<br>BEST ' + G.best;
+  document.getElementById('over').classList.remove('hidden');
+}
+
+// ---------- update ----------
+function update(dt) {
+  G.time += dt;
+  // steering
+  const kr = 1.7 * dt;
+  if (keys.ArrowLeft || keys.KeyA) { if (gyro.active) gyro.yawOffset += kr; else G.yaw += kr; }
+  if (keys.ArrowRight || keys.KeyD) { if (gyro.active) gyro.yawOffset -= kr; else G.yaw -= kr; }
+  if (!gyro.active) {
+    if (keys.ArrowUp || keys.KeyW) G.pitch = clamp(G.pitch + kr, PITCH_MIN, PITCH_MAX);
+    if (keys.ArrowDown || keys.KeyS) G.pitch = clamp(G.pitch - kr, PITCH_MIN, PITCH_MAX);
+  }
+  if (gyro.active) {
+    if (!gyro.calibrated) { gyro.yawOffset = G.yaw - gyro.devYaw; gyro.calibrated = true; }
+    const ty = gyro.devYaw + gyro.yawOffset, tp = clamp(gyro.devPitch, PITCH_MIN, PITCH_MAX);
+    const k = 1 - Math.pow(0.0005, dt); // light smoothing against sensor jitter
+    G.yaw += angDiff(ty, G.yaw) * k; G.pitch += (tp - G.pitch) * k;
+  }
+  setCamera(G.yaw, G.pitch);
+  updateListener();
+
+  if (G.state === 'play') {
+    if (G.phase === 'gap') { G.phaseT -= dt; if (G.phaseT <= 0) lightPanel(); }
+    else if (G.phase === 'lit') {
+      G.elapsed += dt; G.ping -= dt;
+      if (G.ping <= 0 && G.elapsed < G.T - 0.3) { chime(G.lit.c, 0.45); G.ping = 1.5; }
+      if (G.elapsed >= G.T) { G.streak = 0; missSnd(G.lit.c); msg('TOO SLOW', '#ff5a4a', 0.9); startIncoming(G.lit); }
+    } else if (G.phase === 'incoming') {
+      const I = G.inc; I.s += I.v * dt;
+      const p = add(I.S, mul(I.d, Math.max(0, I.s)));
+      whineUpdate(p, clamp(I.s / I.L, 0, 1));
+      const inside = Math.abs(I.s - I.sz) <= I.w;
+      if (inside && !I.inside) zoneEnterSnd();
+      I.inside = inside;
+      if (I.s >= I.L - 0.6) lifeLost();
+    }
+  } else if (G.state === 'dying') {
+    G.phaseT -= dt; if (G.phaseT <= 0) gameOver();
+  }
+  if (G.missT > 0) G.missT -= dt;
+  for (const f of G.frags) { f.t -= dt; f.p = add(f.p, mul(f.v, dt)); f.ang = (f.ang || 0) + f.spin * dt; }
+  G.frags = G.frags.filter(f => f.t > 0);
+  for (const b of G.blooms) b.t += dt; G.blooms = G.blooms.filter(b => b.t < b.dur);
+  for (const b of G.beams) b.t -= dt; G.beams = G.beams.filter(b => b.t > 0);
+  for (const m of G.msgs) m.t -= dt; G.msgs = G.msgs.filter(m => m.t > 0);
+  if (G.flash > 0) G.flash = Math.max(0, G.flash - dt * 1.6);
+  if (G.shake > 0) G.shake = Math.max(0, G.shake - dt);
+}
+
+// ---------- render ----------
+function rotAxis(v, ax, a) { // Rodrigues
+  const c = Math.cos(a), s = Math.sin(a);
+  return add(add(mul(v, c), mul(cross(ax, v), s)), mul(ax, dot(ax, v) * (1 - c)));
+}
+function strokeGlow(col, w, alphaCore) {
+  ctx.strokeStyle = 'rgba(' + col + ',' + (alphaCore * 0.18) + ')'; ctx.lineWidth = w * 4; ctx.stroke();
+  ctx.strokeStyle = 'rgba(' + col + ',' + alphaCore + ')'; ctx.lineWidth = w; ctx.stroke();
+}
+function hexPts(c, basis, r, rot = 0) {
+  const out = [];
+  for (let k = 0; k < 6; k++) {
+    const a = rot + k * Math.PI / 3;
+    out.push(add(c, add(mul(basis[0], Math.cos(a) * r), mul(basis[1], Math.sin(a) * r))));
+  }
+  return out;
+}
+function render() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (G.shake > 0) { const s = G.shake * 14; ctx.translate(rand(-s, s), rand(-s, s)); }
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.globalCompositeOperation = 'lighter';
+
+  // sphere lattice
+  const CV = SPH.V.map(toCam);
+  ctx.beginPath(); for (const [a, b] of SPH.E) segCam(CV[a], CV[b]);
+  strokeGlow('40,255,140', 1.1, 0.55);
+  // vertex nodes
+  ctx.fillStyle = 'rgba(120,255,190,0.75)';
+  for (const c of CV) if (c[2] > NEAR) { const s = proj(c); ctx.fillRect(s[0] - 1.2, s[1] - 1.2, 2.4, 2.4); }
+
+  // column beneath the couch
+  ctx.beginPath();
+  const colR = 0.55, top = -1.4, bot = -Math.sqrt(R * R - colR * colR);
+  for (let k = 0; k < 6; k++) {
+    const a = k * Math.PI / 3, a2 = (k + 1) * Math.PI / 3;
+    const x = Math.cos(a) * colR, z = Math.sin(a) * colR, x2 = Math.cos(a2) * colR, z2 = Math.sin(a2) * colR;
+    seg([x, top, z], [x, bot, z]);
+    for (let y = top; y > bot; y -= 1.5) seg([x, y, z], [x2, y, z2]);
+  }
+  for (let k = 0; k < 12; k++) { // couch base ring
+    const a = k * Math.PI / 6, a2 = (k + 1) * Math.PI / 6;
+    seg([Math.cos(a) * 1.6, -1.1, Math.sin(a) * 1.6], [Math.cos(a2) * 1.6, -1.1, Math.sin(a2) * 1.6]);
+    seg([Math.cos(a) * 1.6, -1.1, Math.sin(a) * 1.6], [Math.cos(a) * colR, top, Math.sin(a) * colR]);
+  }
+  strokeGlow('40,255,140', 1, 0.35);
+
+  // lit panel
+  if (G.phase === 'lit' && G.lit) {
+    const f = G.lit, left = 1 - G.elapsed / G.T;
+    let a = 0.55 + 0.3 * Math.sin(G.time * 10);
+    if (left < 0.25 && Math.sin(G.time * 40) > 0) a *= 0.3; // winking out
+    const vs = f.v.map(i => SPH.V[i]);
+    if (fillPoly(vs)) {
+      ctx.fillStyle = 'rgba(160,255,230,' + (a * 0.55) + ')'; ctx.fill();
+      strokeGlow('200,255,240', 2, a);
+    }
+    const inner = vs.map(v => add(f.c, mul(sub(v, f.c), 0.55)));
+    if (fillPoly(inner)) strokeGlow('255,255,255', 1.2, a);
+  }
+  // panel hit by a missed shot
+  if (G.missT > 0 && G.missFace) {
+    if (fillPoly(G.missFace.v.map(i => SPH.V[i]))) { ctx.fillStyle = 'rgba(255,60,40,' + G.missT + ')'; ctx.fill(); }
+  }
+
+  // incoming projectile and interception zone
+  if (G.phase === 'incoming' && G.inc) {
+    const I = G.inc;
+    // firing panel glows red
+    const fv = I.face.v.map(i => SPH.V[i]);
+    if (fillPoly(fv)) { ctx.fillStyle = 'rgba(255,50,30,' + (0.35 + 0.2 * Math.sin(G.time * 18)) + ')'; ctx.fill(); strokeGlow('255,80,60', 1.5, 0.8); }
+    // dashed trajectory
+    ctx.beginPath();
+    for (let s = 0; s < I.L - 0.6; s += 0.7) seg(add(I.S, mul(I.d, s)), add(I.S, mul(I.d, Math.min(s + 0.35, I.L))));
+    strokeGlow('255,90,60', 1, 0.35);
+    // zone: a hexagonal prism on the path
+    const pulse = 0.5 + 0.5 * Math.sin(G.time * 8);
+    const zcol = I.inside ? '255,230,120' : '255,170,0';
+    const za = I.inside ? 1 : 0.45 + 0.25 * pulse;
+    const front = hexPts(add(I.Zc, mul(I.d, -I.w)), I.basis, I.zrad, G.time * 0.6);
+    const back = hexPts(add(I.Zc, mul(I.d, I.w)), I.basis, I.zrad, G.time * 0.6);
+    ctx.beginPath();
+    for (let k = 0; k < 6; k++) {
+      seg(front[k], front[(k + 1) % 6]); seg(back[k], back[(k + 1) % 6]); seg(front[k], back[k]);
+    }
+    strokeGlow(zcol, I.inside ? 2.4 : 1.6, za);
+    if (I.inside && fillPoly(hexPts(I.Zc, I.basis, I.zrad, G.time * 0.6))) { ctx.fillStyle = 'rgba(255,190,40,0.18)'; ctx.fill(); }
+    // projectile: spinning octahedron
+    if (I.s > 0) {
+      const p = add(I.S, mul(I.d, I.s));
+      const sz = 0.32, ax = I.d, b0 = I.basis[0], b1 = I.basis[1];
+      const pts = [mul(b0, sz), mul(b0, -sz), mul(b1, sz), mul(b1, -sz), mul(ax, sz * 1.8), mul(ax, -sz * 1.8)]
+        .map(v => add(p, rotAxis(v, ax, G.time * 7)));
+      ctx.beginPath();
+      const E = [[0,2],[2,1],[1,3],[3,0],[0,4],[1,4],[2,4],[3,4],[0,5],[1,5],[2,5],[3,5]];
+      for (const [a, b] of E) seg(pts[a], pts[b]);
+      strokeGlow('255,70,50', 2, 1);
+      ctx.beginPath(); seg(p, sub(p, mul(I.d, 1.6))); strokeGlow('255,120,60', 3, 0.5);
+    }
+  }
+
+  // fragments
+  ctx.beginPath();
+  for (const f of G.frags) {
+    const a = add(f.p, rotAxis(f.a, f.ax, f.ang || 0)), b = add(f.p, rotAxis(f.b, f.ax, f.ang || 0));
+    ctx.beginPath(); seg(a, b); strokeGlow(f.col, 1.6, f.t / f.dur);
+  }
+  // shield blooms
+  for (const b of G.blooms) {
+    const k = b.t / b.dur, bs = perpBasis(norm(b.d));
+    ctx.beginPath();
+    const r1 = hexPts(b.c, bs, b.r * (0.3 + k), k * 2), r2 = hexPts(b.c, bs, b.r * (0.15 + k * 0.6), -k * 2);
+    for (let i = 0; i < 6; i++) { seg(r1[i], r1[(i + 1) % 6]); seg(r2[i], r2[(i + 1) % 6]); seg(b.c, r1[i]); }
+    strokeGlow(b.col, 2, 1 - k);
+  }
+
+  ctx.globalCompositeOperation = 'source-over';
+  // twin beams from the couch arms
+  for (const bm of G.beams) {
+    let tx = CX, ty = CY;
+    if (bm.target) { const c = toCam(bm.target); if (c[2] > NEAR) [tx, ty] = proj(c); }
+    const a = bm.t / 0.12;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.beginPath(); ctx.moveTo(W * 0.12, H); ctx.lineTo(tx, ty); ctx.moveTo(W * 0.88, H); ctx.lineTo(tx, ty);
+    strokeGlow(bm.target ? '90,230,255' : '180,255,220', 2.5, a);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  drawHUD();
+
+  if (G.flash > 0) { ctx.fillStyle = 'rgba(' + G.flashCol + ',' + (G.flash * 0.45) + ')'; ctx.fillRect(-20, -20, W + 40, H + 40); }
+}
+
+function drawHUD() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = 'lighter';
+  const green = '60,255,150';
+  // crosshair
+  let ccol = green;
+  if (G.phase === 'lit' && G.lit && angBetween(cf, G.lit.dir) < AIM_TOL) ccol = '220,255,240';
+  if (G.phase === 'incoming' && G.inc && angBetween(cf, G.inc.Zc) < Math.atan2(G.inc.zrad * 1.1, len(G.inc.Zc))) ccol = '255,200,60';
+  ctx.beginPath();
+  ctx.arc(CX, CY, 14, 0, Math.PI * 2);
+  ctx.moveTo(CX - 30, CY); ctx.lineTo(CX - 18, CY); ctx.moveTo(CX + 18, CY); ctx.lineTo(CX + 30, CY);
+  ctx.moveTo(CX, CY - 30); ctx.lineTo(CX, CY - 18); ctx.moveTo(CX, CY + 18); ctx.lineTo(CX, CY + 30);
+  ctx.moveTo(CX + 1.5, CY); ctx.arc(CX, CY, 1.5, 0, Math.PI * 2);
+  strokeGlow(ccol, 1.5, 0.95);
+  // panel timer ring
+  if (G.phase === 'lit') {
+    const left = clamp(1 - G.elapsed / G.T, 0, 1);
+    ctx.beginPath(); ctx.arc(CX, CY, 22, -Math.PI / 2, -Math.PI / 2 + left * Math.PI * 2);
+    strokeGlow(left < 0.25 ? '255,90,60' : '160,255,220', 2, 0.8);
+  }
+  // interceptor pips
+  if (G.phase === 'incoming' && G.inc) {
+    for (let k = 0; k < 2; k++) {
+      ctx.beginPath(); ctx.arc(CX - 8 + k * 16, CY + 44, 4, 0, Math.PI * 2);
+      if (k < G.inc.shots) { ctx.fillStyle = 'rgba(90,230,255,0.9)'; ctx.fill(); }
+      else strokeGlow('90,230,255', 1, 0.5);
+    }
+  }
+  // direction hint: chevron at the screen edge after a second of searching
+  let target = null, delay = 1.0;
+  if (G.phase === 'lit' && G.lit) target = G.lit.c;
+  if (G.phase === 'incoming' && G.inc) { target = G.inc.Zc; delay = 0.3; }
+  const since = G.phase === 'lit' ? G.elapsed : 9;
+  if (target && G.hints && since > delay && !onScreen(target, 30)) {
+    const c = toCam(target);
+    let x = c[0], y = c[1];
+    if (c[2] < 0 && Math.hypot(x, y) < 0.5) x = 1;
+    const ang = Math.atan2(-y, x);
+    const rx = W / 2 - 46, ry = H / 2 - 46;
+    const t = Math.min(rx / Math.abs(Math.cos(ang) || 1e-6), ry / Math.abs(Math.sin(ang) || 1e-6));
+    const px = CX + Math.cos(ang) * t, py = CY + Math.sin(ang) * t;
+    const al = clamp((since - delay) * 2, 0, 1) * (0.55 + 0.35 * Math.sin(G.time * 8));
+    ctx.save(); ctx.translate(px, py); ctx.rotate(ang);
+    ctx.beginPath(); ctx.moveTo(-10, -14); ctx.lineTo(8, 0); ctx.lineTo(-10, 14);
+    ctx.moveTo(-22, -14); ctx.lineTo(-4, 0); ctx.lineTo(-22, 14);
+    strokeGlow(G.phase === 'incoming' ? '255,190,40' : '160,255,220', 2, al);
+    ctx.restore();
+  }
+  // heading tape
+  const hdg = ((-G.yaw / D2R) % 360 + 360) % 360;
+  ctx.beginPath();
+  const tapeW = Math.min(W * 0.6, 420), pxPerDeg = tapeW / 90;
+  ctx.font = '11px "Courier New",monospace'; ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(' + green + ',0.8)';
+  for (let d = Math.ceil((hdg - 45) / 5) * 5; d <= hdg + 45; d += 5) {
+    const x = CX + (d - hdg) * pxPerDeg, big = d % 15 === 0;
+    ctx.moveTo(x, 34); ctx.lineTo(x, big ? 44 : 39);
+    if (d % 45 === 0) ctx.fillText(String(((d % 360) + 360) % 360).padStart(3, '0'), x, 28);
+  }
+  ctx.moveTo(CX, 46); ctx.lineTo(CX - 5, 54); ctx.lineTo(CX + 5, 54); ctx.lineTo(CX, 46);
+  strokeGlow(green, 1, 0.7);
+  // cockpit console
+  ctx.beginPath();
+  ctx.moveTo(0, H - 2); ctx.lineTo(W * 0.16, H * 0.87); ctx.lineTo(W * 0.84, H * 0.87); ctx.lineTo(W, H - 2);
+  ctx.moveTo(W * 0.16, H * 0.87); ctx.lineTo(W * 0.12, H); ctx.moveTo(W * 0.84, H * 0.87); ctx.lineTo(W * 0.88, H);
+  strokeGlow(green, 1, 0.35);
+  ctx.font = '12px "Courier New",monospace'; ctx.fillStyle = 'rgba(' + green + ',0.85)';
+  const inc = (G.pitch / D2R).toFixed(0);
+  ctx.fillText('HDG ' + hdg.toFixed(0).padStart(3, '0') + '   INC ' + (G.pitch >= 0 ? '+' : '') + inc + (gyro.active ? '   GYRO' : ''), CX, H * 0.87 + 22);
+  // score and lives
+  ctx.textAlign = 'left'; ctx.font = 'bold 18px "Courier New",monospace'; ctx.fillStyle = 'rgba(160,255,210,0.95)';
+  ctx.fillText(String(G.score).padStart(6, '0'), 16, 30);
+  ctx.font = '11px "Courier New",monospace'; ctx.fillStyle = 'rgba(' + green + ',0.7)';
+  ctx.fillText('BEST ' + G.best, 16, 46);
+  if (G.streak > 1) { ctx.fillStyle = 'rgba(220,255,240,0.9)'; ctx.fillText('STREAK x' + G.streak, 16, 62); }
+  ctx.fillText(VERSION, 16, H - 12);
+  ctx.beginPath();
+  for (let k = 0; k < G.lives; k++) {
+    const x = W - 26 - k * 24, y = 26;
+    ctx.moveTo(x - 8, y + 6); ctx.lineTo(x, y - 8); ctx.lineTo(x + 8, y + 6); ctx.lineTo(x - 8, y + 6);
+  }
+  strokeGlow('160,255,210', 1.5, 0.9);
+  // messages
+  ctx.textAlign = 'center';
+  G.msgs.forEach((m, i) => {
+    const a = Math.min(1, m.t / 0.3);
+    ctx.globalAlpha = a; ctx.font = 'bold 22px "Courier New",monospace'; ctx.fillStyle = m.col;
+    ctx.fillText(m.text, CX, CY - 70 - i * 28 - (1 - m.t / m.dur) * 12);
+  });
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+// ---------- loop ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (G.state === 'title' || G.state === 'over') { G.yaw += dt * 0.08; G.pitch = Math.sin(G.time * 0.2) * 0.25; }
+  update(dt); render();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+document.addEventListener('visibilitychange', () => {
+  if (!ac) return;
+  if (document.hidden) ac.suspend(); else ac.resume();
+});
+
+// ---------- menus ----------
+const elTitle = document.getElementById('title'), elOver = document.getElementById('over');
+const optGyro = document.getElementById('optGyro'), optHint = document.getElementById('optHint');
+optGyro.checked = G.gyroMode; optHint.checked = G.hints;
+document.getElementById('bestT').textContent = 'BEST ' + G.best;
+optGyro.addEventListener('change', () => { G.gyroMode = optGyro.checked; store.set('gyro', G.gyroMode); document.getElementById('gyroMsg').textContent = ''; });
+optHint.addEventListener('change', () => { G.hints = optHint.checked; store.set('hints', G.hints); });
+function start() {
+  audioInit();
+  if (G.gyroMode) { if (!gyro.enabled) enableGyro(); } else disableGyro();
+  elTitle.classList.add('hidden'); elOver.classList.add('hidden');
+  G.yaw = 0; G.pitch = 0;
+  newGame();
+}
+document.getElementById('start').addEventListener('click', start);
+document.getElementById('again').addEventListener('click', start);
+document.getElementById('menu').addEventListener('click', () => {
+  elOver.classList.add('hidden'); elTitle.classList.remove('hidden'); G.state = 'title';
+  document.getElementById('bestT').textContent = 'BEST ' + G.best;
+});
+})();
+</script>
+</body>
+</html>
