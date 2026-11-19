@@ -35,8 +35,8 @@
 
 <div id="title" class="ov">
   <h1>SPACE JOCKEY</h1>
-  <div class="ver">v0.1</div>
-  <p class="sub">Listen for the chime. Swing the couch onto the lit panel and fire before it winks out.
+  <div class="ver">v0.2</div>
+  <p class="sub">Listen for the chime. Swing the couch onto the lit panel and fire before it winks out. Every panel you hit is gone for good: clear all 320 to win.
     Miss, or dither, and the sphere fires back.</p>
   <button id="start">START</button>
   <div class="opts">
@@ -44,12 +44,18 @@
     <label><input type="checkbox" id="optHint" checked>Direction hint after a second</label>
   </div>
   <div id="gyroMsg"></div>
-  <div class="help">Drag to rotate and tilt the couch. Tap, click or Space to fire. Arrow keys also steer.<br>
+  <div class="help">On a computer the mouse or trackpad steers the couch directly (Esc releases it); click or Space to fire. On touch: drag to steer, tap to fire. Arrow keys also steer.<br>
     When the sphere returns fire, an amber zone lights up on the projectile's path.
     Aim at it and fire while the projectile is inside it. You have two interceptors per attack.</div>
   <div class="note">Headphones essential: the chime tells you where to look.<br>
     AirPods: turn off Spatialise Stereo in Control Centre while playing, or it fights the game's own positioning.</div>
   <div class="best" id="bestT">BEST 0</div>
+</div>
+
+<div id="pause" class="ov hidden">
+  <h1 style="font-size:40px">PAUSED</h1>
+  <p class="sub" style="margin-top:14px">Click to take the controls again. Esc releases the mouse.</p>
+  <button id="resume">RESUME</button>
 </div>
 
 <div id="over" class="ov hidden">
@@ -61,7 +67,7 @@
 <script>
 (() => {
 'use strict';
-const VERSION = 'v0.1';
+const VERSION = 'v0.2';
 
 // ---------- maths ----------
 const D2R = Math.PI / 180;
@@ -101,16 +107,20 @@ function buildSphere(subdiv) {
     F = NF;
   }
   V = V.map(v => mul(v, R));
-  const eset = new Set(); const E = [];
-  for (const [a, b, c] of F) for (const [p, q] of [[a,b],[b,c],[c,a]]) {
-    const k = p < q ? p + '_' + q : q + '_' + p;
-    if (!eset.has(k)) { eset.add(k); E.push([p, q]); }
-  }
+  const emap = new Map(); const E = []; const EF = []; const VF = V.map(() => []);
+  F.forEach(([a, b, c], fi) => {
+    VF[a].push(fi); VF[b].push(fi); VF[c].push(fi);
+    for (const [p, q] of [[a,b],[b,c],[c,a]]) {
+      const k = p < q ? p + '_' + q : q + '_' + p;
+      if (!emap.has(k)) { emap.set(k, E.length); E.push([p, q]); EF.push([]); }
+      EF[emap.get(k)].push(fi);
+    }
+  });
   const faces = F.map((v, i) => {
     const dir = norm(add(add(V[v[0]], V[v[1]]), V[v[2]]));
     return { i, v, dir, c: mul(dir, R * 0.985), elev: Math.asin(dir[1]) };
   });
-  return { V, E, faces };
+  return { V, E, EF, VF, faces };
 }
 const SPH = buildSphere(2); // 320 panels
 
@@ -288,13 +298,15 @@ const store = {
 };
 
 // ---------- state ----------
-const PITCH_MIN = -70 * D2R, PITCH_MAX = 85 * D2R;
+const PITCH_MIN = -88 * D2R, PITCH_MAX = 88 * D2R;
+const alive = new Array(SPH.faces.length).fill(true);
+let aliveCount = SPH.faces.length;
 const G = {
   state: 'title', yaw: 0, pitch: 0, best: store.get('best', 0),
   score: 0, lives: 3, streak: 0, hits: 0, T: 5,
   phase: 'gap', phaseT: 0, lit: null, elapsed: 0, ping: 0, lastLit: -1,
   inc: null, missFace: null, missT: 0,
-  frags: [], blooms: [], beams: [], msgs: [], flash: 0, flashCol: '255,40,30', shake: 0, time: 0,
+  frags: [], points: [], sweep: null, paused: false, mouseMode: false, blooms: [], beams: [], msgs: [], flash: 0, flashCol: '255,40,30', shake: 0, time: 0,
   hints: store.get('hints', true), gyroMode: store.get('gyro', false)
 };
 
@@ -302,8 +314,32 @@ const G = {
 const keys = {};
 const ptr = { id: null, x: 0, y: 0, sx: 0, sy: 0, t: 0, moved: 0 };
 const DRAG_SENS = 0.0055;
+// Desktop: capture the mouse/trackpad (pointer lock) so it can't drift off the window.
+const PL_OK = 'requestPointerLock' in cv;
+const FINE = window.matchMedia && window.matchMedia('(pointer: fine)').matches;
+const MOUSE_SENS = 0.0024;
+const locked = () => document.pointerLockElement === cv;
+function lockMouse() {
+  if (!PL_OK || gyro.enabled) return;
+  try { const r = cv.requestPointerLock(); if (r && r.catch) r.catch(() => {}); } catch (_) {}
+}
+document.addEventListener('mousemove', e => {
+  if (!locked() || G.state !== 'play' || G.paused) return;
+  G.yaw -= (e.movementX || 0) * MOUSE_SENS;
+  G.pitch = clamp(G.pitch - (e.movementY || 0) * MOUSE_SENS, PITCH_MIN, PITCH_MAX);
+});
+document.addEventListener('pointerlockchange', () => {
+  if (locked()) { G.mouseMode = true; setPaused(false); }
+  else if (G.mouseMode && G.state === 'play') setPaused(true);
+});
+function setPaused(v) {
+  G.paused = v; document.getElementById('pause').classList.toggle('hidden', !v);
+  if (whine) whine.g.gain.value = v ? 0.0001 : 0.16;
+}
 cv.addEventListener('pointerdown', e => {
   e.preventDefault();
+  if (locked()) { if (G.state === 'play' && !G.paused) fire(); return; }
+  if (e.pointerType === 'mouse' && FINE && PL_OK && G.state === 'play' && !gyro.enabled) { lockMouse(); return; }
   if (ptr.id !== null) return;
   ptr.id = e.pointerId; ptr.x = ptr.sx = e.clientX; ptr.y = ptr.sy = e.clientY; ptr.t = performance.now(); ptr.moved = 0;
   try { cv.setPointerCapture(e.pointerId); } catch (_) {}
@@ -378,15 +414,17 @@ function angDiff(a, b) { let d = a - b; while (d > Math.PI) d -= 2*Math.PI; whil
 // ---------- game flow ----------
 function newGame() {
   Object.assign(G, { state: 'play', score: 0, lives: 3, streak: 0, hits: 0, T: 5, phase: 'gap', phaseT: 1.2,
-    lit: null, inc: null, frags: [], blooms: [], beams: [], msgs: [], flash: 0, shake: 0, lastLit: -1, missFace: null });
+    lit: null, inc: null, frags: [], points: [], paused: false, won: false, blooms: [], beams: [], msgs: [], flash: 0, shake: 0, lastLit: -1, missFace: null });
+  alive.fill(true); aliveCount = SPH.faces.length;
   gyro.calibrated = false;
   msg('LISTEN', '#7fffc0', 1.2);
+  startSweep();
 }
 function msg(text, col, dur) { G.msgs.push({ text, col, t: dur, dur }); }
 
 function pickFace() {
-  const lo = -42 * D2R, hi = 62 * D2R;
-  let cands = SPH.faces.filter(f => f.elev > lo && f.elev < hi && f.i !== G.lastLit);
+  let cands = SPH.faces.filter(f => alive[f.i] && f.i !== G.lastLit);
+  if (!cands.length) cands = SPH.faces.filter(f => alive[f.i]);
   const far = cands.filter(f => angBetween(f.dir, cf) > 55 * D2R);
   if (far.length) cands = far;
   return cands[(Math.random() * cands.length) | 0];
@@ -403,7 +441,7 @@ function fire() {
     if (angBetween(cf, G.lit.dir) < AIM_TOL) hitPanel();
     else {
       let best = null, bd = -2;
-      for (const f of SPH.faces) { const d = dot(f.dir, cf); if (d > bd) { bd = d; best = f; } }
+      for (const f of SPH.faces) { if (!alive[f.i]) continue; const d = dot(f.dir, cf); if (d > bd) { bd = d; best = f; } }
       G.missFace = best; G.missT = 0.5; missSnd(best.c);
       G.streak = 0; msg('MISS', '#ff5a4a', 0.9);
       startIncoming(G.lit);
@@ -432,9 +470,17 @@ function hitPanel() {
   G.score += pts;
   if (react < 0.55) G.T = Math.max(1.3, G.T * 0.86);   // quick: next panel stays lit for less time
   else G.T = Math.min(6, G.T * 1.08);                   // slow: next one lingers a little longer
-  shatterFace(f, '127,255,200'); boomSnd(f.c, false);
+  alive[f.i] = false; aliveCount--;
+  pointBurst(f); boomSnd(f.c, false);
   msg('+' + pts + (G.streak > 1 ? '  x' + G.streak : ''), '#7fffc0', 0.9);
   G.lit = null; G.phase = 'gap'; G.phaseT = 0.75;
+  if (aliveCount <= 0) sphereCleared();
+}
+function sphereCleared() {
+  const bonus = 2000 + G.lives * 1000;
+  G.score += bonus; G.won = true;
+  msg('SPHERE CLEARED  +' + bonus, '#7fffc0', 2.2);
+  G.phase = 'over'; G.state = 'dying'; G.phaseT = 2.4;
 }
 function shatterFace(f, col) {
   const vs = f.v.map(i => SPH.V[i]);
@@ -444,6 +490,33 @@ function shatterFace(f, col) {
     G.frags.push({ a: sub(a, m), b: sub(b, m), p: m, v: add(mul(f.dir, -rand(2, 5)), [rand(-1.5,1.5), rand(-1.5,1.5), rand(-1.5,1.5)]),
       spin: rand(-6, 6), ax: norm([rand(-1,1), rand(-1,1), rand(-1,1)]), t: 1.1, dur: 1.1, col });
   }
+}
+// Prometheus-style hologram: the panel dissolves into a drifting, flickering point cloud,
+// leaving a dotted ghost of its outline hanging in place for a moment.
+function pointBurst(f) {
+  const vs = f.v.map(i => SPH.V[i]);
+  for (let k = 0; k < 380; k++) {
+    let a = Math.random(), b = Math.random(); if (a + b > 1) { a = 1 - a; b = 1 - b; }
+    const p = add(vs[0], add(mul(sub(vs[1], vs[0]), a), mul(sub(vs[2], vs[0]), b)));
+    const life = rand(1.0, 2.2);
+    G.points.push({ p, v: add(mul(f.dir, -rand(0.3, 3.2)), [rand(-.9,.9), rand(-.9,.9), rand(-.9,.9)]),
+      t: life, dur: life, tw: rand(0, 6.28), col: Math.random() < 0.15 ? '255,255,255' : '120,205,255' });
+  }
+  for (let e = 0; e < 3; e++) for (let k = 0; k < 40; k++) {
+    const p = add(vs[e], mul(sub(vs[(e + 1) % 3], vs[e]), k / 40));
+    G.points.push({ p, v: [0, 0, 0], t: 1.6, dur: 1.6, tw: rand(0, 6.28), col: '160,230,255' });
+  }
+}
+// Pups-style laser scan: a bright ring sweeps down the sphere, lighting the lattice as it passes.
+function startSweep() {
+  G.sweep = { t: 0, dur: 1.5 };
+  if (!ac) return; const t = ac.currentTime;
+  const n = ac.createBufferSource(); n.buffer = noiseBuf; n.loop = true;
+  const f = ac.createBiquadFilter(); f.type = 'bandpass'; f.Q.value = 6;
+  f.frequency.setValueAtTime(3500, t); f.frequency.exponentialRampToValueAtTime(300, t + 1.5);
+  const g = ac.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.2);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 1.5);
+  n.connect(f); f.connect(g); g.connect(master); n.start(t); n.stop(t + 1.6);
 }
 function startIncoming(face) {
   G.lit = null; G.phase = 'incoming';
@@ -476,10 +549,13 @@ function lifeLost() {
   G.inc = null;
   if (G.lives <= 0) {
     G.phase = 'over'; G.state = 'dying'; G.phaseT = 1.6; msg('COUCH LOST', '#ff5a4a', 1.6);
-  } else { G.phase = 'gap'; G.phaseT = 1.4; msg('HIT  ' + G.lives + ' LEFT', '#ff5a4a', 1.2); }
+  } else { G.phase = 'gap'; G.phaseT = 1.8; startSweep(); msg('HIT  ' + G.lives + ' LEFT', '#ff5a4a', 1.2); }
 }
 function gameOver() {
   G.state = 'over';
+  document.querySelector('#over h2').textContent = G.won ? 'SPHERE CLEARED' : 'COUCH LOST';
+  document.querySelector('#over h2').style.color = G.won ? '#7fffc0' : '';
+  if (locked()) document.exitPointerLock();
   if (G.score > G.best) { G.best = G.score; store.set('best', G.best); }
   document.getElementById('finalScore').innerHTML = 'SCORE ' + G.score + '<br>BEST ' + G.best;
   document.getElementById('over').classList.remove('hidden');
@@ -505,7 +581,8 @@ function update(dt) {
   setCamera(G.yaw, G.pitch);
   updateListener();
 
-  if (G.state === 'play') {
+  if (G.state === 'play' && G.paused) { /* frozen */ }
+  else if (G.state === 'play') {
     if (G.phase === 'gap') { G.phaseT -= dt; if (G.phaseT <= 0) lightPanel(); }
     else if (G.phase === 'lit') {
       G.elapsed += dt; G.ping -= dt;
@@ -524,6 +601,9 @@ function update(dt) {
     G.phaseT -= dt; if (G.phaseT <= 0) gameOver();
   }
   if (G.missT > 0) G.missT -= dt;
+  for (const q of G.points) { q.t -= dt; q.p = add(q.p, mul(q.v, dt)); q.v = mul(q.v, 1 - 0.8 * dt); }
+  G.points = G.points.filter(q => q.t > 0);
+  if (G.sweep) { G.sweep.t += dt; if (G.sweep.t >= G.sweep.dur) G.sweep = null; }
   for (const f of G.frags) { f.t -= dt; f.p = add(f.p, mul(f.v, dt)); f.ang = (f.ang || 0) + f.spin * dt; }
   G.frags = G.frags.filter(f => f.t > 0);
   for (const b of G.blooms) b.t += dt; G.blooms = G.blooms.filter(b => b.t < b.dur);
@@ -559,11 +639,23 @@ function render() {
 
   // sphere lattice
   const CV = SPH.V.map(toCam);
-  ctx.beginPath(); for (const [a, b] of SPH.E) segCam(CV[a], CV[b]);
+  // faint tint on living panels, so destroyed ones read as black holes
+  ctx.beginPath();
+  for (const f of SPH.faces) {
+    if (!alive[f.i] || dot(f.dir, cf) < 0.2) continue;
+    const c = clipPoly([CV[f.v[0]], CV[f.v[1]], CV[f.v[2]]]); if (c.length < 3) continue;
+    c.forEach((q, i) => { const sp = proj(q); i ? ctx.lineTo(sp[0], sp[1]) : ctx.moveTo(sp[0], sp[1]); }); ctx.closePath();
+  }
+  ctx.fillStyle = 'rgba(30,200,110,0.09)'; ctx.fill();
+  ctx.beginPath();
+  for (let i = 0; i < SPH.E.length; i++) {
+    const ef = SPH.EF[i]; if (!alive[ef[0]] && !alive[ef[1]]) continue;
+    segCam(CV[SPH.E[i][0]], CV[SPH.E[i][1]]);
+  }
   strokeGlow('40,255,140', 1.1, 0.55);
   // vertex nodes
   ctx.fillStyle = 'rgba(120,255,190,0.75)';
-  for (const c of CV) if (c[2] > NEAR) { const s = proj(c); ctx.fillRect(s[0] - 1.2, s[1] - 1.2, 2.4, 2.4); }
+  CV.forEach((c, i) => { if (c[2] > NEAR && SPH.VF[i].some(fi => alive[fi])) { const s = proj(c); ctx.fillRect(s[0] - 1.2, s[1] - 1.2, 2.4, 2.4); } });
 
   // column beneath the couch
   ctx.beginPath();
@@ -635,6 +727,35 @@ function render() {
     }
   }
 
+  // laser sweep ring
+  if (G.sweep) {
+    const k = G.sweep.t / G.sweep.dur, el = (88 - 150 * k) * D2R, y = Math.sin(el) * R * 0.99, rr = Math.cos(el) * R * 0.99;
+    const fade = Math.min(1, (1 - k) * 4);
+    ctx.beginPath();
+    for (let i = 0; i < 64; i++) {
+      const a = i / 64 * Math.PI * 2, a2 = (i + 1) / 64 * Math.PI * 2;
+      seg([Math.cos(a) * rr, y, Math.sin(a) * rr], [Math.cos(a2) * rr, y, Math.sin(a2) * rr]);
+    }
+    strokeGlow('140,220,255', 2.5, fade);
+    ctx.beginPath();
+    for (let ei = 0; ei < SPH.E.length; ei++) {
+      const [a, b] = SPH.E[ei], ef = SPH.EF[ei]; if (!alive[ef[0]] && !alive[ef[1]]) continue;
+      const ea = Math.asin(SPH.V[a][1] / R), eb = Math.asin(SPH.V[b][1] / R);
+      if (Math.abs(ea - el) < 0.12 || Math.abs(eb - el) < 0.12) segCam(CV[a], CV[b]);
+    }
+    strokeGlow('160,230,255', 1.6, fade * 0.9);
+    ctx.fillStyle = 'rgba(220,245,255,' + fade + ')';
+    for (let i = 0; i < SPH.V.length; i++) {
+      if (Math.abs(Math.asin(SPH.V[i][1] / R) - el) < 0.1 && CV[i][2] > NEAR) { const s = proj(CV[i]); ctx.fillRect(s[0] - 2.5, s[1] - 2.5, 5, 5); }
+    }
+  }
+  // hologram point clouds
+  for (const q of G.points) {
+    const c = toCam(q.p); if (c[2] < NEAR) continue;
+    const s = proj(c), sz = clamp(26 / c[2], 1, 3.5);
+    const a = (q.t / q.dur) * (0.45 + 0.55 * Math.abs(Math.sin(G.time * 17 + q.tw)));
+    ctx.fillStyle = 'rgba(' + q.col + ',' + a + ')'; ctx.fillRect(s[0] - sz / 2, s[1] - sz / 2, sz, sz);
+  }
   // fragments
   ctx.beginPath();
   for (const f of G.frags) {
@@ -739,9 +860,9 @@ function drawHUD() {
   ctx.textAlign = 'left'; ctx.font = 'bold 18px "Courier New",monospace'; ctx.fillStyle = 'rgba(160,255,210,0.95)';
   ctx.fillText(String(G.score).padStart(6, '0'), 16, 30);
   ctx.font = '11px "Courier New",monospace'; ctx.fillStyle = 'rgba(' + green + ',0.7)';
-  ctx.fillText('BEST ' + G.best, 16, 46);
+  ctx.fillText('BEST ' + G.best + '   PANELS ' + aliveCount + '/' + SPH.faces.length, 16, 46);
   if (G.streak > 1) { ctx.fillStyle = 'rgba(220,255,240,0.9)'; ctx.fillText('STREAK x' + G.streak, 16, 62); }
-  ctx.fillText(VERSION, 16, H - 12);
+  ctx.fillText(VERSION + (locked() ? '   ESC releases mouse' : ''), 16, H - 12);
   ctx.beginPath();
   for (let k = 0; k < G.lives; k++) {
     const x = W - 26 - k * 24, y = 26;
@@ -785,10 +906,12 @@ function start() {
   audioInit();
   if (G.gyroMode) { if (!gyro.enabled) enableGyro(); } else disableGyro();
   elTitle.classList.add('hidden'); elOver.classList.add('hidden');
-  G.yaw = 0; G.pitch = 0;
-  newGame();
+  G.yaw = 0; G.pitch = 0; G.mouseMode = false;
+  newGame(); setPaused(false);
+  if (FINE && !G.gyroMode) lockMouse();
 }
 document.getElementById('start').addEventListener('click', start);
+document.getElementById('resume').addEventListener('click', () => { audioInit(); lockMouse(); setPaused(false); });
 document.getElementById('again').addEventListener('click', start);
 document.getElementById('menu').addEventListener('click', () => {
   elOver.classList.add('hidden'); elTitle.classList.remove('hidden'); G.state = 'title';
